@@ -7,7 +7,7 @@ use crate::types::{SourceConfig, SourceId};
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Identity {
     pub key: String,
-    aliases: Vec<String>,
+    pub aliases: Vec<String>,
 }
 
 impl Identity {
@@ -49,12 +49,20 @@ impl Identity {
     }
 
     pub fn source(&self, sources: &[SourceConfig]) -> Option<SourceId> {
+        self.source_except(sources, None)
+    }
+
+    pub fn source_except(
+        &self,
+        sources: &[SourceConfig],
+        except: Option<SourceId>,
+    ) -> Option<SourceId> {
         // An explicit assignment of the stable id beats an older assignment
         // of the same application's display name or binary on another row.
         self.aliases.iter().find_map(|key| {
             sources
                 .iter()
-                .find(|source| source.apps.contains(key))
+                .find(|source| Some(source.id) != except && source.apps.contains(key))
                 .map(|source| source.id)
         })
     }

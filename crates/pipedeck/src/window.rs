@@ -1379,6 +1379,7 @@ mod tests {
             .set_active(false);
         assert_eq!(&*gains.borrow(), &[0.72]);
         assert_eq!(&*mutes.borrow(), &[false]);
+        crate::channel_dialog::verify_legacy_app_ui(&window.window, &engine);
         engine.shutdown();
         window.window.close();
     }

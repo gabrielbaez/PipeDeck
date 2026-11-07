@@ -188,12 +188,19 @@ struct Stage {
     /// Kept alive as long as the stage exists. See [`LoadedModule`].
     _module: LoadedModule,
     wanted: ChainState,
+    /// Input rows have no sink to carry their master, so each cell applies
+    /// it here, after effects, without changing the cell's saved balance.
+    master: ChainState,
 }
 
 impl Stage {
     fn apply(&self) {
         if let Some(node) = &self.node {
-            apply_props(&node.proxy, &self.node_name, &self.wanted);
+            apply_props(
+                &node.proxy,
+                &self.node_name,
+                &self.wanted.with_master(self.master),
+            );
         }
     }
 }
@@ -641,6 +648,7 @@ impl Graph {
                 node: None,
                 _module: module,
                 wanted: output.state(),
+                master: ChainState::default(),
             }),
             Err(e) => {
                 log::error!("{e}");
@@ -895,7 +903,21 @@ impl Graph {
             sources: self
                 .source_meters
                 .iter()
-                .map(|(id, meter)| (*id, meter.take()))
+                .map(|(id, meter)| {
+                    let peak = meter.take();
+                    let peak = self
+                        .config
+                        .source(*id)
+                        .filter(|source| source.is_input())
+                        .map_or(peak, |source| {
+                            if source.muted {
+                                0.0
+                            } else {
+                                peak * source.state().linear_volume()
+                            }
+                        });
+                    (*id, peak)
+                })
                 .collect(),
             mixes: self
                 .mix_meters
@@ -1227,7 +1249,7 @@ impl Graph {
             .map(|cfg| cfg.apps.clone())
             .unwrap_or_default();
         for key in &apps {
-            self.move_app(key, None);
+            self.reroute_app(key, Some(id));
         }
         // The voices play into the row's sink, so they go before it.
         let voices: Vec<(SourceId, String)> = self
@@ -1777,8 +1799,8 @@ impl Graph {
         Ok(())
     }
 
-    /// Trim of a row, applied to its sink. An input row has no sink, so it
-    /// keeps the value for the interface and changes nothing in the graph.
+    /// A virtual row's sink carries its master. For physical input rows,
+    /// apply the master to each cell without touching the hardware volume.
     pub fn update_source(
         &mut self,
         id: SourceId,
@@ -1791,10 +1813,19 @@ impl Graph {
         let mut state = cfg.state();
         f(&mut state);
         cfg.set_state(state);
+        let is_input = cfg.is_input();
         if let Some(sink) = self.sources.get(&id).and_then(|s| s.sink.as_ref()) {
             apply_props(sink, &id.sink_node_name(), &state);
             self.written
                 .insert(Owner::Source(id), std::time::Instant::now());
+        }
+        if is_input {
+            for ((source, _), link) in &mut self.links {
+                if *source == id {
+                    link.master = state;
+                    link.apply();
+                }
+            }
         }
         self.dirty = true;
         self.emit(Event::SourceChanged { id, state });
@@ -1826,6 +1857,11 @@ impl Graph {
         self.stage_index
             .insert(node_name.clone(), StageRef::Cell(link.source, link.mix));
 
+        let master = if source.is_input() {
+            source.state()
+        } else {
+            ChainState::default()
+        };
         let spec = LoopbackSpec::for_link(&source, &mix, &self.config.latency);
         let module = match LoadedModule::load(&self.context, LOOPBACK_MODULE, &spec.to_args()) {
             Ok(module) => module,
@@ -1843,6 +1879,7 @@ impl Graph {
                 node: None,
                 _module: module,
                 wanted: link.state(),
+                master,
             },
         );
         log::info!("{} feeds {}", source.name, mix.name);
@@ -2101,6 +2138,7 @@ impl Graph {
                 continue;
             }
             stream.app.key = identity.key.clone();
+            stream.app.aliases = identity.aliases.clone();
             stream.identity = identity;
             if stream.identity.matches(voice_app()) && stream._watch.is_none() {
                 watches.push((*id, stream.global.to_owned()));
@@ -2234,6 +2272,7 @@ impl Graph {
         };
         let app = App {
             key: identity.key.clone(),
+            aliases: identity.aliases.clone(),
             name: app_name(props),
             icon: props
                 .get("application.icon-name")
@@ -2606,6 +2645,18 @@ impl Graph {
         }
     }
 
+    /// Removing one spelling or row need not remove another valid assignment.
+    fn reroute_app(&self, key: &str, except: Option<SourceId>) {
+        for (id, stream) in self
+            .streams
+            .iter()
+            .filter(|(_, stream)| !stream.pinned && stream.identity.matches(key))
+        {
+            let source = stream.identity.source_except(&self.config.sources, except);
+            self.move_stream(*id, &stream.app.name, source);
+        }
+    }
+
     /// Assign an application to a row, taking it from whichever row had it.
     pub fn assign_app(&mut self, id: SourceId, key: String) -> Result<(), EngineError> {
         if self.config.source(id).is_none() {
@@ -2640,7 +2691,7 @@ impl Graph {
             .ok_or(EngineError::UnknownSource(id))?;
         source.apps.retain(|app| app != key);
         self.dirty = true;
-        self.move_app(key, None);
+        self.reroute_app(key, None);
         self.sync_voices();
         Ok(())
     }
@@ -2649,7 +2700,13 @@ impl Graph {
     fn app_list(&self) -> Vec<App> {
         let mut apps: Vec<App> = Vec::new();
         for stream in self.streams.values() {
-            if !apps.iter().any(|app| app.key == stream.app.key) {
+            if let Some(app) = apps.iter_mut().find(|app| app.key == stream.app.key) {
+                for alias in &stream.app.aliases {
+                    if !app.aliases.contains(alias) {
+                        app.aliases.push(alias.clone());
+                    }
+                }
+            } else {
                 apps.push(stream.app.clone());
             }
         }

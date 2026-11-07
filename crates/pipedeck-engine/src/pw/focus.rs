@@ -117,6 +117,7 @@ mod tests {
     fn app(key: &str, name: &str) -> App {
         App {
             key: key.into(),
+            aliases: vec![],
             name: name.into(),
             icon: None,
         }

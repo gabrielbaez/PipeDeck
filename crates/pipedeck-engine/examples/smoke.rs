@@ -4,6 +4,7 @@
 //! the mix to a real device, then tears everything down and checks that no
 //! Pipedeck node is left behind. Run with
 //! `cargo run -p pipedeck-engine --example smoke` (needs a running PipeWire).
+//! Pass `-- --review-regressions` to run only alias and input-master cases.
 
 use std::process::{Command as Process, ExitCode};
 use std::sync::mpsc;
@@ -501,6 +502,277 @@ fn identity_player(args: &[String]) -> Result<(), pipewire::Error> {
     Ok(())
 }
 
+/// The adversarial review cases use only synthetic devices, even on a desktop.
+fn assignment_and_input_regressions(
+    engine: &pipedeck_engine::EngineHandle,
+    rx: &mpsc::Receiver<Event>,
+    dir: &std::path::Path,
+    failures: &mut u32,
+) {
+    std::fs::create_dir_all(dir).unwrap();
+    let input = format!("smoke-review-input-{}", std::process::id());
+    let tone = dir.join("input-tone.wav");
+    tone_wav(&tone, 120);
+    // A native producer presented as a capture source, with no hardware or
+    // default-output connection. Its consumers drive the processing clock.
+    let mut tone_player = Process::new("pw-play")
+        .arg("--target=0")
+        .arg(format!(
+            "--properties={{ media.class=Audio/Source node.name={input} }}"
+        ))
+        .arg(&tone)
+        .spawn()
+        .unwrap();
+    let fixture = dir.join("review-regressions.toml");
+    std::fs::write(
+        &fixture,
+        format!(
+            r#"
+latency = "512/48000"
+[[mix]]
+id = 101
+name = "Input test A"
+[[mix]]
+id = 102
+name = "Input test B"
+[[source]]
+id = 101
+name = "Legacy assignment"
+apps = ["Spotify"]
+[[source]]
+id = 102
+name = "Canonical assignment"
+apps = ["com.spotify.Client"]
+[[source]]
+id = 103
+name = "Synthetic input"
+device = "{input}"
+gain = 0.5
+muted = true
+[[link]]
+source = 103
+mix = 101
+gain = 0.8
+[[link]]
+source = 103
+mix = 102
+gain = 0.6
+muted = true
+"#
+        ),
+    )
+    .unwrap();
+    let reload = || {
+        drain(rx);
+        engine.send(Command::ImportConfig(fixture.clone())).unwrap();
+        wait_state(rx, "review fixture imported", |s| {
+            s.sources.iter().any(|source| source.id == SourceId(103))
+        });
+        settle();
+    };
+    reload();
+    let mut player = Process::new(std::env::current_exe().unwrap())
+        .args([
+            "--identity-player",
+            "com.spotify.Client",
+            "Spotify",
+            "spotify",
+            "review-alias-player",
+        ])
+        .spawn()
+        .unwrap();
+    let apps = wait_for(
+        rx,
+        "canonical identity and legacy aliases",
+        |event| matches!(event, Event::Apps { running } if running.iter().any(|app| app.key == "com.spotify.Client" && app.matches("Spotify"))),
+    );
+    check(
+        matches!(apps, Event::Apps { running } if running.iter().any(|app| app.matches("Spotify") && app.matches("spotify"))),
+        "the UI receives legacy aliases with the canonical app key",
+        failures,
+    );
+    let routed = |row: u32| {
+        let dump = pw_dump();
+        any_node_id(&dump, "review-alias-player")
+            .zip(node_id(&dump, &format!("pipedeck-smoke.src.{row}")))
+            .is_some_and(|pair| links(&dump).contains(&pair))
+    };
+    settle();
+    check(
+        routed(102),
+        "the canonical assignment takes precedence",
+        failures,
+    );
+    engine
+        .send(Command::ReleaseApp {
+            id: SourceId(101),
+            app: "Spotify".into(),
+        })
+        .unwrap();
+    settle();
+    check(
+        routed(102),
+        "releasing a legacy alias preserves the canonical route",
+        failures,
+    );
+    reload();
+    engine
+        .send(Command::ReleaseApp {
+            id: SourceId(102),
+            app: "com.spotify.Client".into(),
+        })
+        .unwrap();
+    settle();
+    check(
+        routed(101),
+        "releasing the canonical id falls back to the remaining legacy route",
+        failures,
+    );
+    engine
+        .send(Command::ReleaseApp {
+            id: SourceId(101),
+            app: "Spotify".into(),
+        })
+        .unwrap();
+    settle();
+    check(
+        !routed(101) && !routed(102),
+        "removing the last alias releases the stream",
+        failures,
+    );
+    reload();
+    engine.send(Command::RemoveSource(SourceId(101))).unwrap();
+    wait_state(rx, "legacy row removed", |s| {
+        s.sources.iter().all(|source| source.id != SourceId(101))
+    });
+    settle();
+    check(
+        routed(102),
+        "removing a legacy row preserves the canonical route",
+        failures,
+    );
+    let _ = player.kill();
+    let _ = player.wait();
+
+    let mic = SourceId(103);
+    let mix = MixId(101);
+    let cell = "pipedeck-smoke.link.103.101";
+    let other = "pipedeck-smoke.link.103.102";
+    let volume_is = |name: &str, gain: f32, muted: bool| {
+        node_volume(&pw_dump(), name).is_some_and(|(volumes, mute)| {
+            !volumes.is_empty()
+                && volumes
+                    .iter()
+                    .all(|value| (*value - gain.powi(3)).abs() < 1e-5)
+                && mute == muted
+        })
+    };
+    check(
+        volume_is(cell, 0.4, true) && volume_is(other, 0.3, true),
+        "input cells start with the saved master gain and mute",
+        failures,
+    );
+    engine
+        .send(Command::SetSourceMute {
+            id: mic,
+            muted: false,
+        })
+        .unwrap();
+    settle();
+    check(
+        volume_is(cell, 0.4, false) && volume_is(other, 0.3, true),
+        "unmuting the input master preserves the other cell's own mute",
+        failures,
+    );
+    engine
+        .send(Command::SetLinkGain {
+            source: mic,
+            mix,
+            gain: 0.4,
+        })
+        .unwrap();
+    engine
+        .send(Command::SetSourceGain { id: mic, gain: 0.8 })
+        .unwrap();
+    settle();
+    check(
+        volume_is(cell, 0.32, false) && volume_is(other, 0.48, true),
+        "input master and independent cell faders compose without compounding",
+        failures,
+    );
+
+    // Record actual mix samples, rather than relying on control state.
+    let mix_serial = node_serial(&pw_dump(), "pipedeck-smoke.mix.101").unwrap();
+    let open = record_peak(mix_serial, 1, &dir.join("input-open.wav"));
+    check(
+        open > 0.001,
+        &format!("a recorder hears the trimmed input: {open:.5}"),
+        failures,
+    );
+    engine
+        .send(Command::SetSourceMute {
+            id: mic,
+            muted: true,
+        })
+        .unwrap();
+    settle();
+    let muted = record_peak(mix_serial, 1, &dir.join("input-muted.wav"));
+    check(
+        muted < open * 0.1,
+        &format!("input master mute silences recorded audio: {muted:.5} vs {open:.5}"),
+        failures,
+    );
+    let hardware = pw_dump()
+        .into_iter()
+        .find(|node| props(node)["node.name"] == input)
+        .unwrap();
+    let param = &hardware["info"]["params"]["Props"][0];
+    check(
+        param["mute"] == false
+            && param["channelVolumes"]
+                .as_array()
+                .is_some_and(|values| values.iter().all(|value| value.as_f64() == Some(1.0))),
+        "input master controls leave the physical device controls unchanged",
+        failures,
+    );
+
+    let saved = dir.join("review-master-saved.toml");
+    engine.send(Command::ExportConfig(saved.clone())).unwrap();
+    wait_for(
+        rx,
+        "review state exported",
+        |event| matches!(event, Event::Notice(text) if text.contains("exported")),
+    );
+    let state: pipedeck_engine::Config =
+        toml::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+    check(
+        state
+            .links
+            .iter()
+            .any(|link| link.source == mic && link.mix == mix && link.gain == 0.4 && !link.muted)
+            && state.links.iter().any(|link| {
+                link.source == mic && link.mix == MixId(102) && link.gain == 0.6 && link.muted
+            }),
+        "master changes preserve the saved independent cell balances",
+        failures,
+    );
+    drain(rx);
+    engine.send(Command::ImportConfig(saved)).unwrap();
+    wait_state(rx, "saved input master restored", |s| {
+        s.sources
+            .iter()
+            .any(|source| source.id == mic && source.gain == 0.8 && source.muted)
+    });
+    settle();
+    check(
+        volume_is(cell, 0.32, true) && volume_is(other, 0.48, true),
+        "restoring the graph preserves the input master and cell mutes",
+        failures,
+    );
+    let _ = tone_player.kill();
+    let _ = tone_player.wait();
+}
+
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args().collect();
     if args.get(1).is_some_and(|arg| arg == "--identity-player") {
@@ -533,6 +805,18 @@ fn main() -> ExitCode {
 
     // A fresh config starts with one mix and no source.
     let state = wait_state(&rx, "initial state", |_| true);
+    if args.get(1).is_some_and(|arg| arg == "--review-regressions") {
+        assignment_and_input_regressions(&engine, &rx, &dir, &mut failures);
+        engine.shutdown();
+        wait_for(&rx, "Stopped", |event| matches!(event, Event::Stopped));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&control_dir);
+        return if failures == 0 {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
     let mix: MixId = state.mixes.first().expect("one mix by default").id;
     // The first Devices event is empty: the registry has not replied yet, and
     // the real list follows on the next housekeeping tick.
@@ -2557,6 +2841,18 @@ fn main() -> ExitCode {
         .expect("the dock's row")
         .id;
     engine
+        .send(Command::SetSourceGain {
+            id: dock_row,
+            gain: 0.5,
+        })
+        .unwrap();
+    engine
+        .send(Command::SetSourceMute {
+            id: dock_row,
+            muted: true,
+        })
+        .unwrap();
+    engine
         .send(Command::SetLink {
             source: dock_row,
             mix: dock_mix,
@@ -2653,6 +2949,16 @@ fn main() -> ExitCode {
     check(
         replaced(),
         "a same-name replug replaces both dock loopbacks",
+        &mut failures,
+    );
+    settle();
+    check(
+        node_volume(&pw_dump(), &cell_node).is_some_and(|(volumes, muted)| {
+            muted
+                && !volumes.is_empty()
+                && volumes.iter().all(|volume| (*volume - 0.125).abs() < 1e-5)
+        }),
+        "the replugged input retains its master volume and mute",
         &mut failures,
     );
     // Unplugged again, then what crashed the mixer: its output switched
@@ -2764,6 +3070,8 @@ fn main() -> ExitCode {
         "the mixer exported is the one running",
         &mut failures,
     );
+
+    assignment_and_input_regressions(&engine, &rx, &dir, &mut failures);
 
     engine.shutdown();
     wait_for(&rx, "Stopped", |e| matches!(e, Event::Stopped));

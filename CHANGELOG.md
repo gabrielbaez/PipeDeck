@@ -8,6 +8,14 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Physical input channel masters now scale and mute every connected mix,
+  while preserving cell balances and leaving hardware controls untouched.
+  Their settings windows offer the same master controls as the channel cards.
+- Releasing a legacy application alias or removing its row now resolves
+  remaining assignments instead of overriding a surviving canonical route.
+- Legacy application assignments show their playing status and stay out of
+  the add-app picker when the stream reports a canonical Flatpak id.
+
 - Muted speaker buttons now show a red muted icon throughout the mixer and
   settings. Channel and mix cards have live master volume sliders and mute buttons,
   including changes from OpenDeck, without changing independent cell levels.

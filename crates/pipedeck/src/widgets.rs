@@ -122,8 +122,7 @@ impl MasterControl {
     }
 }
 
-/// A meter bar, thin enough to sit under a fader without crowding it.
-pub use crate::meter_fader::{Meter, MeterFader};
+pub use crate::meter_fader::MeterFader;
 
 /// The mute and the fader side by side.
 pub fn level_row(mute: &gtk::ToggleButton, fader: &impl IsA<gtk::Widget>) -> gtk::Box {
