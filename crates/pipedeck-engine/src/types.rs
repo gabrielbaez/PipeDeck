@@ -661,7 +661,7 @@ pub struct Effect {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct App {
     /// What an assignment matches on, stable across runs of the application:
-    /// its binary when the server knows it, its name otherwise.
+    /// its Flatpak id when available, otherwise its binary or name.
     pub key: String,
     /// What to show.
     pub name: String,

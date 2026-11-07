@@ -8,6 +8,18 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Muted speaker buttons now show a red muted icon throughout the mixer and
+  settings. Channel and mix cards have live master volume sliders and mute buttons,
+  including changes from OpenDeck, without changing independent cell levels.
+- Dock loopbacks could remain alive after their input or output device
+  disappeared on PipeWire versions that do not destroy them automatically.
+  Device removals now explicitly retire affected cells and outputs on the
+  engine tick, preserving their settings until the device returns.
+- Flatpak applications selected from the installed-app list, including
+  Spotify and browsers, stayed on the default channel. Their streams now
+  match the portal's application id from the PipeWire client, including
+  when that identity arrives after playback starts. Existing assignments
+  using binary or application names continue to work.
 - Pipedeck crashed when a device it played to or read from went away, a
   dock unplugged or a USB card waking up again, then a mix's output was
   switched off or a channel removed. The loopbacks that went with the
