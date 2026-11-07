@@ -8,6 +8,8 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- OpenDeck's “In front” action keeps matching Flatpak applications by their
+  executable aliases when the stream and window PIDs cannot be related.
 - Physical input channel masters now scale and mute every connected mix,
   while preserving cell balances and leaving hardware controls untouched.
   Their settings windows offer the same master controls as the channel cards.

@@ -1312,6 +1312,26 @@ fn main() -> ExitCode {
             &format!("{name} routes by its Flatpak client id (assigned before playback: {before})"),
             &mut failures,
         );
+        if suffix == "Browser" {
+            // Sandboxed stream pids need not relate to the host window pid.
+            // OpenDeck's "In front" action must still identify the binary.
+            engine
+                .send(Command::SetFocus {
+                    pid: u32::MAX,
+                    class: "MsEdGe".into(),
+                })
+                .unwrap();
+            let focused = wait_for(
+                &rx,
+                "the focused Flatpak browser",
+                |event| matches!(event, Event::Focused { app: Some(app) } if app.key == id),
+            );
+            check(
+                matches!(focused, Event::Focused { app: Some(app) } if app.key == id && app.matches("msedge")),
+                "a window-class alias resolves the canonical Flatpak app for In front",
+                &mut failures,
+            );
+        }
         engine
             .send(Command::ReleaseApp {
                 id: source,
