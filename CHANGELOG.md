@@ -8,6 +8,28 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- OpenDeck's “In front” action keeps matching Flatpak applications by their
+  executable aliases when the stream and window PIDs cannot be related.
+- Physical input channel masters now scale and mute every connected mix,
+  while preserving cell balances and leaving hardware controls untouched.
+  Their settings windows offer the same master controls as the channel cards.
+- Releasing a legacy application alias or removing its row now resolves
+  remaining assignments instead of overriding a surviving canonical route.
+- Legacy application assignments show their playing status and stay out of
+  the add-app picker when the stream reports a canonical Flatpak id.
+
+- Muted speaker buttons now show a red muted icon throughout the mixer and
+  settings. Channel and mix cards have live master volume sliders and mute buttons,
+  including changes from OpenDeck, without changing independent cell levels.
+- Dock loopbacks could remain alive after their input or output device
+  disappeared on PipeWire versions that do not destroy them automatically.
+  Device removals now explicitly retire affected cells and outputs on the
+  engine tick, preserving their settings until the device returns.
+- Flatpak applications selected from the installed-app list, including
+  Spotify and browsers, stayed on the default channel. Their streams now
+  match the portal's application id from the PipeWire client, including
+  when that identity arrives after playback starts. Existing assignments
+  using binary or application names continue to work.
 - Pipedeck crashed when a device it played to or read from went away, a
   dock unplugged or a USB card waking up again, then a mix's output was
   switched off or a channel removed. The loopbacks that went with the

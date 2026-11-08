@@ -29,15 +29,12 @@ pub struct ChannelDialog {
     look: gtk::Box,
     volume: gtk::Scale,
     mute: gtk::ToggleButton,
-    /// Hidden for an input row, which has no sink to trim.
+    /// Channel master, applied to the sink or to the input row's cells.
     trim: gtk::Box,
     /// What an input row captures, named the way the system names it.
     device: gtk::Label,
     /// The trim's fader, with the channel's level drawn in its track.
     fader: widgets::MeterFader,
-    /// The level alone, for a channel bound to a microphone, which has no
-    /// trim to draw it in.
-    meter: widgets::Meter,
     apps: gtk::Box,
     /// The effects tab, which a mix window has too.
     effects: Rc<EffectPanel>,
@@ -54,7 +51,7 @@ pub struct ChannelDialog {
     gone: Rc<StdCell<bool>>,
     /// The applications drawn, and the ones playing the picker was made
     /// with: drawn again only when these change, not under the pointer.
-    drawn_apps: RefCell<Option<(Vec<String>, Vec<String>)>>,
+    drawn_apps: RefCell<Option<(Vec<String>, Vec<App>)>>,
     /// The people of past calls on the row carrying them, each with a way
     /// to forget them, and who was drawn there.
     past: gtk::Box,
@@ -111,7 +108,6 @@ impl ChannelDialog {
             volume,
             mute,
             fader,
-            meter: widgets::Meter::new(),
             apps: gtk::Box::new(gtk::Orientation::Vertical, 8),
             effects: EffectPanel::new(engine, source.id),
             add_app,
@@ -164,24 +160,18 @@ impl ChannelDialog {
         self.look.append(&self.badge);
         left.append(&self.look);
 
-        let caption = gtk::Label::new(Some(if source.is_input() {
-            "Captured device"
-        } else {
-            "Channel volume"
-        }));
+        if source.is_input() {
+            let captured = gtk::Label::new(Some("Captured device"));
+            captured.add_css_class("dim-label");
+            captured.set_margin_top(12);
+            left.append(&captured);
+            left.append(&self.device);
+        }
+        let caption = gtk::Label::new(Some("Channel volume"));
         caption.add_css_class("dim-label");
         caption.set_margin_top(12);
         left.append(&caption);
-
-        // An input row owns no node to carry a trim, so the left pane says
-        // what it listens to instead of offering a fader.
-        if source.is_input() {
-            left.append(&self.device);
-            self.meter.root.set_margin_top(6);
-            left.append(&self.meter.root);
-        } else {
-            left.append(&self.trim);
-        }
+        left.append(&self.trim);
 
         let filler = gtk::Box::new(gtk::Orientation::Vertical, 0);
         filler.set_vexpand(true);
@@ -368,7 +358,6 @@ impl ChannelDialog {
     /// Move the meter of the object this window is about.
     pub fn set_level(&self, peak: f32) {
         self.fader.set_level(peak);
-        self.meter.set_level(peak);
     }
 
     pub fn id(&self) -> SourceId {
@@ -434,7 +423,7 @@ impl ChannelDialog {
         // Drawn again only when what is assigned or what plays changed: an
         // application starting anywhere says so, and the list and its
         // picker made again each time would close the picker as it is used.
-        let playing: Vec<String> = running.iter().map(|app| app.key.clone()).collect();
+        let playing = running.to_vec();
         let now = (source.apps.clone(), playing);
         if self.drawn_apps.borrow().as_ref() == Some(&now) {
             self.syncing.set(false);
@@ -457,7 +446,7 @@ impl ChannelDialog {
         for key in &source.apps {
             // An assigned application that is not playing right now is still
             // listed, since the assignment is what outlives the stream.
-            let row = self.app_row(key, running.iter().find(|app| &app.key == key));
+            let row = self.app_row(key, running.iter().find(|app| app.matches(key)));
             self.apps.append(&row);
         }
 
@@ -592,7 +581,14 @@ impl ChannelDialog {
         // rebuilds the list.
         let mut rows: Vec<(String, gtk::Widget)> = Vec::new();
 
-        let held = |key: &str| source.apps.iter().any(|app| app == key);
+        let held = |key: &str| {
+            source.apps.iter().any(|assigned| {
+                assigned == key
+                    || running
+                        .iter()
+                        .any(|app| app.matches(key) && app.matches(assigned))
+            })
+        };
         let playing: Vec<&App> = running.iter().filter(|app| !held(&app.key)).collect();
         if !playing.is_empty() {
             rows.push((String::new(), section("Playing now")));
@@ -607,7 +603,7 @@ impl ChannelDialog {
         let installed: Vec<&DesktopApp> = self
             .installed
             .iter()
-            .filter(|app| !held(&app.key) && !running.iter().any(|r| r.key == app.key))
+            .filter(|app| !held(&app.key) && !running.iter().any(|r| r.matches(&app.key)))
             .collect();
         if !installed.is_empty() {
             rows.push((String::new(), section("Installed")));
@@ -698,4 +694,44 @@ fn section(label: &str) -> gtk::Widget {
     heading.set_margin_top(6);
     heading.set_margin_start(6);
     heading.upcast()
+}
+
+#[cfg(test)]
+pub(super) fn verify_legacy_app_ui(parent: &impl IsA<gtk::Widget>, engine: &EngineLink) {
+    fn labels(root: &gtk::Widget) -> Vec<String> {
+        let mut text = Vec::new();
+        if let Some(label) = root.downcast_ref::<gtk::Label>() {
+            text.push(label.text().to_string());
+        }
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            text.extend(labels(&widget));
+            child = widget.next_sibling();
+        }
+        text
+    }
+    let mut source = SourceConfig::virtual_sink(SourceId(99), "Legacy music");
+    source.apps = vec!["Spotify".into()];
+    let mut running = vec![App {
+        key: "com.spotify.Client".into(),
+        aliases: vec![],
+        name: "Spotify".into(),
+        icon: None,
+    }];
+    let dialog =
+        ChannelDialog::present(parent, engine, &source, &[], &running, &[], &Status::Absent);
+    assert!(labels(dialog.apps.upcast_ref())
+        .iter()
+        .any(|text| text == "Not running"));
+    // The canonical key remains the same when late client aliases arrive.
+    running[0].aliases = vec!["Spotify".into(), "spotify".into()];
+    dialog.refresh(&source, &[], &running, &[], &Status::Absent);
+    let text = labels(dialog.apps.upcast_ref());
+    assert!(text.iter().any(|text| text == "Playing"));
+    assert!(!text.iter().any(|text| text == "Not running"));
+    let popover = dialog.app_popover(&source, &running);
+    assert!(!labels(popover.upcast_ref())
+        .iter()
+        .any(|text| text == "Playing now" || text == "Spotify"));
+    dialog.close_gone();
 }

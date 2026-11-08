@@ -74,6 +74,8 @@ with its icon, under `~/.local/share` on its first start.
 virtual output, which any application can pick in its audio settings, or a
 capture device such as a microphone. You can attach applications to a
 channel: Pipedeck moves their audio there whenever they start playing.
+Flatpak applications are matched by their application id, so an app picked
+from the installed list follows the same channel when it starts playing.
 
 **Mixes** (columns) are where sound goes. Each mix is an input device named
 after it: OBS, Discord or a browser list it with the microphones. A mix can
@@ -82,6 +84,10 @@ be up to five mixes: Personal, Chat, Stream, Record and Aux.
 
 **Cells** connect a channel to a mix. A cell exists only once you press `+`
 on it, and it carries that pair's fader and mute.
+The channel and mix cards have master volume sliders and mute buttons, including
+changes made from a Stream Deck. These are separate from the levels in
+individual cells. Input-channel masters adjust what Pipedeck sends to its
+mixes; they do not change the capture device's hardware volume.
 
 **The ear** on a mix card says whether you hear that mix in your
 headphones. The button in the header bar chooses which device your
